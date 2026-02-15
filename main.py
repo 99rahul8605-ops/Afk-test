@@ -82,10 +82,18 @@ async def is_afk(user_id: int):
 async def remove_afk(user_id: int):
     await afk_collection.delete_one({"user_id": user_id})
 
-async def add_user(user_id: int):
+async def add_user(user_id: int, first_name: str = "", username: str = ""):
+    """Add or update user info, including total AFK time field."""
     await users_collection.update_one(
         {"user_id": user_id},
-        {"$set": {"last_seen": datetime.now()}},
+        {
+            "$set": {
+                "first_name": first_name,
+                "username": username,
+                "last_seen": datetime.now()
+            },
+            "$setOnInsert": {"total_afk_time": 0}  # Initialize total AFK time if new user
+        },
         upsert=True
     )
 
@@ -94,6 +102,19 @@ async def count_users():
 
 async def count_afk_users():
     return await afk_collection.count_documents({})
+
+async def update_user_afk_time(user_id: int, additional_seconds: int):
+    """Add to the total AFK time for a user."""
+    await users_collection.update_one(
+        {"user_id": user_id},
+        {"$inc": {"total_afk_time": additional_seconds}}
+    )
+
+async def get_top_afk_users(limit=10):
+    """Retrieve top users by total AFK time."""
+    cursor = users_collection.find({"total_afk_time": {"$gt": 0}}).sort("total_afk_time", -1).limit(limit)
+    top_users = await cursor.to_list(length=limit)
+    return top_users
 
 # Track groups
 async def track_group(chat_id: int, chat_title: str):
@@ -345,7 +366,7 @@ async def start_command(_, message: Message):
     
     # Add user to database for stats
     if user:
-        await add_user(user.id)
+        await add_user(user.id, user.first_name or "", user.username or "")
     
     keyboard = InlineKeyboardMarkup(
         [
@@ -404,6 +425,7 @@ async def help_callback(_, query):
 
 **Other Commands:**
 - /stats - Show bot statistics
+- /topafk - Show top 10 users with highest total AFK time
 - /autodel - Configure auto-delete settings for this group (Admins only)
 """
     
@@ -474,8 +496,9 @@ async def afk_handler(_, message: Message):
         # Initialize auto-delete settings if not exists
         await init_group_auto_delete_settings(message.chat.id)
     
-    # Add user to database for stats
-    await add_user(user_id)
+    # Add user to database for stats (update name and username)
+    user = message.from_user
+    await add_user(user_id, user.first_name or "", user.username or "")
     
     # Extract command and reason from message
     if message.text and message.text.lower().startswith("brb"):
@@ -486,6 +509,11 @@ async def afk_handler(_, message: Message):
     
     # User is returning from AFK
     if verifier:
+        # Calculate AFK duration and add to total
+        afk_start = reasondb["time"]
+        afk_duration = int(time.time() - afk_start)
+        await update_user_afk_time(user_id, afk_duration)
+        
         await remove_afk(user_id)
         try:
             afktype = reasondb["type"]
@@ -618,8 +646,9 @@ async def afk_watcher(_, message: Message):
     # Initialize auto-delete settings if not exists
     await init_group_auto_delete_settings(message.chat.id)
     
-    # Add user to database for stats
-    await add_user(userid)
+    # Add user to database for stats (update name and username)
+    user = message.from_user
+    await add_user(userid, user.first_name or "", user.username or "")
 
     # Check if user is returning from AFK
     verifier, reasondb = await is_afk(userid)
@@ -629,6 +658,11 @@ async def afk_watcher(_, message: Message):
                for cmd in ["/afk", "!afk", "brb"]):
             return
             
+        # Calculate AFK duration and add to total
+        afk_start = reasondb["time"]
+        afk_duration = int(time.time() - afk_start)
+        await update_user_afk_time(userid, afk_duration)
+        
         # Remove AFK status and notify
         await remove_afk(userid)
         try:
@@ -1187,6 +1221,37 @@ async def stats_command(_, message: Message):
     )
     
     sent_msg = await message.reply_text(stats_text)
+    await track_message_for_deletion(sent_msg)
+
+# Top AFK command
+@app.on_message(filters.command("topafk"))
+async def top_afk_command(_, message: Message):
+    """Show top 10 users with highest total AFK time."""
+    top_users = await get_top_afk_users(10)
+    
+    if not top_users:
+        await message.reply_text("No AFK time recorded yet.")
+        return
+    
+    text = "🏆 **Top 10 AFK Users**\n\n"
+    for idx, user in enumerate(top_users, start=1):
+        user_id = user["user_id"]
+        total_time = user.get("total_afk_time", 0)
+        first_name = user.get("first_name", "Unknown")
+        username = user.get("username", "")
+        
+        # Format the name with username if available
+        if username:
+            name_display = f"@{username}"
+        else:
+            name_display = first_name
+        
+        # Format total time
+        time_str = get_readable_time(total_time)
+        
+        text += f"{idx}. **{name_display}** – {time_str}\n"
+    
+    sent_msg = await message.reply_text(text)
     await track_message_for_deletion(sent_msg)
 
 # Auto-delete menu command (inline buttons) - Per Group Settings
