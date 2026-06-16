@@ -353,6 +353,66 @@ app = Bot()
 # Track bot start time for uptime
 BOT_START_TIME = time.time()
 
+# Cooldown tracker for Force AFK notifications (user_id -> last_notified timestamp)
+_force_afk_notified: dict = {}
+FORCE_AFK_NOTIFY_COOLDOWN = 30  # seconds between notifications per user
+
+# Funny comments shown when a user goes AFK
+AFK_FUNNY_COMMENTS = [
+    # Chill / classic
+    "Finally some peace and quiet. 🙏",
+    "Gone to touch some grass. 🌿",
+    "Loading... please wait for their return. ⏳",
+    "Their WiFi called it quits first. 📶",
+    "Probably fell asleep on the keyboard. 💤",
+    "The chat will miss them... or not. 😐",
+    "Plot twist: they were never really here. 👻",
+    "Searching for motivation to come back... 🔍",
+    "Even their phone needs a break from them. 📵",
+    "Gone to talk to real humans. Weird choice. 🤷",
+    "AFK but make it dramatic. 🎭",
+    "Their mom called. Classic. 📞",
+    "Bathroom break that became a life decision. 🚽",
+    "Officially unavailable, unofficially napping. 😴",
+    "Left the group chat energy but forgot to log off. 💀",
+    "Nature called. Nature always wins. 🌿",
+    "Be back never. Just kidding... probably. 😅",
+    "Off to stare at the ceiling and rethink life. 🤔",
+    "They said BRB in 2019 and we still wait. ⏰",
+    "Gone with the wifi. 🌬️",
+    # Roasting type
+    "The group IQ just went up a little. 📈",
+    "Nobody noticed, but ok. 🙃",
+    "Even their houseplant is more active than them. 🪴",
+    "Probably rage-quit real life. Can't blame them. 😤",
+    "Their contribution to this chat? Leaving it. 👏",
+    "The group just got 10x more productive. 🚀",
+    "They ghosted us before ghosting was cool. 😎",
+    "Out here living their best mediocre life. 💅",
+    "Their phone battery lasts longer than their attention span. 🔋",
+    "Gone to find their personality. Good luck. 🔎",
+    "Escaped the group chat. We all dream of that. 😔",
+    "Ran away faster than their responsibilities. 🏃",
+    "Probably crying about their Wi-Fi speed. 😭",
+    "Their excuse is always 'I was busy'. Sure. 🙄",
+    "Left so fast even their shadow is still here. 👤",
+    "Went to make tea. Has been making tea since 2022. ☕",
+    "Their last brain cell needed rest too. 🧠",
+    "Somewhere out there, not being useful. As usual. 😌",
+    "The WiFi is fine. They just needed an excuse. 📡",
+    "Ran out of things to say. Honestly, same. 🤐",
+    "Probably watching YouTube and calling it 'research'. 📺",
+    "AFK aka Avoiding Friends & Keyboard. 💀",
+    "Don't worry, no one was listening anyway. 🎤",
+    "Their vibe just left the chat. The chat is better off. ✌️",
+    "Took their daily nap disguised as an AFK. 🛌",
+    "The most consistent thing about them is going AFK. 📊",
+    "Left without warning like their WiFi router. 😑",
+    "Off to pretend they have a social life. 🎉",
+    "Finally the group has someone to blame for the silence. 🫵",
+    "Plot armor activated. They'll be back when needed. ⚔️",
+]
+
 # Track when bot is added to a group
 @app.on_message(filters.new_chat_members)
 async def new_chat_members(_, message: Message):
@@ -643,6 +703,7 @@ async def afk_handler(_, message: Message):
     response = f"**{message.from_user.first_name}** is now AFK"
     if details["reason"]:
         response += f"\n\nReason: `{details['reason']}`"
+    response += f"\n\n_{random.choice(AFK_FUNNY_COMMENTS)}_"
     sent_msg = await message.reply_text(response)
     await track_message_for_deletion(sent_msg)
 
@@ -659,12 +720,11 @@ async def force_afk_handler(_, message: Message):
     user = message.from_user
     user_id = user.id
 
-    # Check if already in force AFK
     already, _ = await is_force_afk(user_id)
     if already:
         sent_msg = await message.reply_text(
-            f"⚠️ **{user.first_name}**, you are already in Force AFK mode!\n\n"
-            "Use /unafk to disable it."
+            f"⚠️ **{user.first_name}**, you are already in Force AFK mode!\n"
+            "Send /unafk to turn it off."
         )
         await track_message_for_deletion(sent_msg)
         return
@@ -673,16 +733,17 @@ async def force_afk_handler(_, message: Message):
     await add_user(user_id, user.first_name or "", user.username or "")
 
     sent_msg = await message.reply_text(
-        f"🔒 **Force AFK Enabled** for {user.mention}\n\n"
-        "Your messages will be **deleted automatically** until you send /unafk.\n\n"
-        "⚠️ Use /unafk to disable Force AFK."
+        f"🔒 **Force AFK Enabled!**\n\n"
+        f"Hey {user.mention}, your messages will now be **auto-deleted** "
+        f"as long as Force AFK is active.\n\n"
+        f"➡️ Send /unafk whenever you're back."
     )
     await track_message_for_deletion(sent_msg)
 
 
-@app.on_message(filters.command(["unafk"], prefixes=["/", "!"]) & filters.group)
+@app.on_message(filters.command(["unafk"], prefixes=["/", "!"]))
 async def unafk_handler(_, message: Message):
-    """Remove Force AFK status"""
+    """Remove Force AFK status — works in group and private"""
     if message.sender_chat:
         return
 
@@ -700,10 +761,13 @@ async def unafk_handler(_, message: Message):
     duration = get_readable_time(int(time.time() - data["time"]))
     await remove_force_afk(user_id)
 
+    # Clear cooldown entry for this user
+    _force_afk_notified.pop(user_id, None)
+
     sent_msg = await message.reply_text(
-        f"✅ **Force AFK Disabled** for {user.mention}\n\n"
-        f"You were in Force AFK for **{duration}**.\n"
-        "Welcome back! 🎉"
+        f"✅ **Force AFK Disabled!**\n\n"
+        f"Welcome back, {user.mention}! 🎉\n"
+        f"You were in Force AFK for **{duration}**."
     )
     await track_message_for_deletion(sent_msg)
 
@@ -722,34 +786,42 @@ async def force_afk_watcher(_, message: Message):
     user_id = user.id
     msg_text = (message.text or message.caption or "").strip().lower()
 
-    # Allow /unafk command to pass through
-    if msg_text.startswith("/unafk") or msg_text.startswith("!unafk"):
+    # Allow /unafk and /forceafk commands to pass through
+    if any(msg_text.startswith(cmd) for cmd in ["/unafk", "!unafk", "/forceafk", "!forceafk"]):
         return
 
     active, data = await is_force_afk(user_id)
     if not active:
         return
 
-    duration = get_readable_time(int(time.time() - data["time"]))
-
-    # Try to delete the user's message
+    # Delete the user's message silently
     try:
         await message.delete()
     except Exception as e:
-        logger.error(f"Force AFK: failed to delete message of {user_id}: {e}")
+        logger.error(f"Force AFK: couldn't delete message of {user_id}: {e}")
 
-    # Send notification
+    # Notify with cooldown — avoid spamming on every single message
+    now = time.time()
+    last_notified = _force_afk_notified.get(user_id, 0)
+    if now - last_notified < FORCE_AFK_NOTIFY_COOLDOWN:
+        return
+
+    _force_afk_notified[user_id] = now
+    duration = get_readable_time(int(now - data["time"]))
+
     try:
         sent_msg = await app.send_message(
             message.chat.id,
-            f"🔒 **{user.mention}** is in **Force AFK** mode!\n\n"
-            f"Duration: `{duration}`\n\n"
-            "Use /unafk to disable Force AFK.",
+            f"🔒 {user.mention} is in **Force AFK** mode!\n"
+            f"⏱ Active for: `{duration}`\n\n"
+            f"Their messages are being auto-deleted.\n"
+            f"➡️ They can send /unafk to come back.",
             disable_web_page_preview=True
         )
         await track_message_for_deletion(sent_msg)
     except Exception as e:
-        logger.error(f"Force AFK: failed to send notification: {e}")
+        logger.error(f"Force AFK: couldn't send notification: {e}")
+
 @app.on_message(
     filters.group & ~filters.bot & ~filters.me & ~filters.service,
     group=1
