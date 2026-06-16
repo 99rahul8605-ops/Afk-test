@@ -46,6 +46,7 @@ users_collection = db.users  # For user stats
 groups_collection = db.groups  # For tracking groups
 broadcast_collection = db.broadcast_tmp  # For temporary broadcast data
 auto_delete_collection = db.auto_delete  # For auto-delete settings and messages
+force_afk_collection = db.force_afk  # For force AFK users
 
 # Helper functions
 def get_readable_time(seconds: int) -> str:
@@ -81,6 +82,23 @@ async def is_afk(user_id: int):
 
 async def remove_afk(user_id: int):
     await afk_collection.delete_one({"user_id": user_id})
+
+# =======================================================================
+# Force AFK helper functions
+# =======================================================================
+async def set_force_afk(user_id: int, first_name: str = ""):
+    await force_afk_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"user_id": user_id, "first_name": first_name, "time": time.time()}},
+        upsert=True
+    )
+
+async def is_force_afk(user_id: int):
+    data = await force_afk_collection.find_one({"user_id": user_id})
+    return bool(data), data or {}
+
+async def remove_force_afk(user_id: int):
+    await force_afk_collection.delete_one({"user_id": user_id})
 
 async def add_user(user_id: int, first_name: str = "", username: str = ""):
     """Add or update user info, including total AFK time field."""
@@ -427,6 +445,8 @@ async def help_callback(_, query):
 - /stats - Show bot statistics
 - /topafk - Show top 10 users with highest total AFK time
 - /autodel - Configure auto-delete settings for this group (Admins only)
+- /forceafk - Enable Force AFK (your messages get deleted until /unafk)
+- /unafk - Disable Force AFK mode
 """
     
     await query.message.edit_text(
@@ -626,7 +646,110 @@ async def afk_handler(_, message: Message):
     sent_msg = await message.reply_text(response)
     await track_message_for_deletion(sent_msg)
 
-# AFK watcher
+# =======================================================================
+# Force AFK feature
+# =======================================================================
+
+@app.on_message(filters.command(["forceafk"], prefixes=["/", "!"]))
+async def force_afk_handler(_, message: Message):
+    """Set Force AFK for yourself - bot will delete your messages until you /unafk"""
+    if message.sender_chat:
+        return
+
+    user = message.from_user
+    user_id = user.id
+
+    # Check if already in force AFK
+    already, _ = await is_force_afk(user_id)
+    if already:
+        sent_msg = await message.reply_text(
+            f"⚠️ **{user.first_name}**, you are already in Force AFK mode!\n\n"
+            "Use /unafk to disable it."
+        )
+        await track_message_for_deletion(sent_msg)
+        return
+
+    await set_force_afk(user_id, user.first_name or "")
+    await add_user(user_id, user.first_name or "", user.username or "")
+
+    sent_msg = await message.reply_text(
+        f"🔒 **Force AFK Enabled** for {user.mention}\n\n"
+        "Your messages will be **deleted automatically** until you send /unafk.\n\n"
+        "⚠️ Use /unafk to disable Force AFK."
+    )
+    await track_message_for_deletion(sent_msg)
+
+
+@app.on_message(filters.command(["unafk"], prefixes=["/", "!"]) & filters.group)
+async def unafk_handler(_, message: Message):
+    """Remove Force AFK status"""
+    if message.sender_chat:
+        return
+
+    user = message.from_user
+    user_id = user.id
+
+    active, data = await is_force_afk(user_id)
+    if not active:
+        sent_msg = await message.reply_text(
+            f"ℹ️ **{user.first_name}**, you don't have Force AFK active."
+        )
+        await track_message_for_deletion(sent_msg)
+        return
+
+    duration = get_readable_time(int(time.time() - data["time"]))
+    await remove_force_afk(user_id)
+
+    sent_msg = await message.reply_text(
+        f"✅ **Force AFK Disabled** for {user.mention}\n\n"
+        f"You were in Force AFK for **{duration}**.\n"
+        "Welcome back! 🎉"
+    )
+    await track_message_for_deletion(sent_msg)
+
+
+# Force AFK watcher — deletes messages of users with force AFK active
+@app.on_message(
+    filters.group & ~filters.bot & ~filters.me & ~filters.service,
+    group=0  # Higher priority than normal afk_watcher (group=1)
+)
+async def force_afk_watcher(_, message: Message):
+    """Delete messages from users who have Force AFK active"""
+    if not message.from_user:
+        return
+
+    user = message.from_user
+    user_id = user.id
+    msg_text = (message.text or message.caption or "").strip().lower()
+
+    # Allow /unafk command to pass through
+    if msg_text.startswith("/unafk") or msg_text.startswith("!unafk"):
+        return
+
+    active, data = await is_force_afk(user_id)
+    if not active:
+        return
+
+    duration = get_readable_time(int(time.time() - data["time"]))
+
+    # Try to delete the user's message
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.error(f"Force AFK: failed to delete message of {user_id}: {e}")
+
+    # Send notification
+    try:
+        sent_msg = await app.send_message(
+            message.chat.id,
+            f"🔒 **{user.mention}** is in **Force AFK** mode!\n\n"
+            f"Duration: `{duration}`\n\n"
+            "Use /unafk to disable Force AFK.",
+            disable_web_page_preview=True
+        )
+        await track_message_for_deletion(sent_msg)
+    except Exception as e:
+        logger.error(f"Force AFK: failed to send notification: {e}")
 @app.on_message(
     filters.group & ~filters.bot & ~filters.me & ~filters.service,
     group=1
