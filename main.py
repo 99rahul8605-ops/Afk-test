@@ -8,7 +8,7 @@ import random
 import string
 from datetime import datetime
 from flask import Flask
-from pyrogram import Client, filters, enums, idle
+from pyrogram import Client, filters, enums, idle, ContinuePropagation
 from pyrogram.types import (
     Message, 
     InlineKeyboardMarkup, 
@@ -780,7 +780,7 @@ async def unafk_handler(_, message: Message):
 async def force_afk_watcher(client, message: Message):
     """Delete messages from users who have Force AFK active"""
     if not message.from_user:
-        client.continue_propagation()
+        raise ContinuePropagation
 
     user = message.from_user
     user_id = user.id
@@ -788,11 +788,11 @@ async def force_afk_watcher(client, message: Message):
 
     # Allow /unafk and /forceafk commands to pass through
     if any(msg_text.startswith(cmd) for cmd in ["/unafk", "!unafk", "/forceafk", "!forceafk"]):
-        client.continue_propagation()
+        raise ContinuePropagation
 
     active, data = await is_force_afk(user_id)
     if not active:
-        client.continue_propagation()
+        raise ContinuePropagation
 
     # Delete the user's message silently
     try:
