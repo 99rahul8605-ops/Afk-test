@@ -777,10 +777,10 @@ async def unafk_handler(_, message: Message):
     filters.group & ~filters.bot & ~filters.me & ~filters.service,
     group=0  # Higher priority than normal afk_watcher (group=1)
 )
-async def force_afk_watcher(_, message: Message):
+async def force_afk_watcher(client, message: Message):
     """Delete messages from users who have Force AFK active"""
     if not message.from_user:
-        return
+        client.continue_propagation()
 
     user = message.from_user
     user_id = user.id
@@ -788,11 +788,11 @@ async def force_afk_watcher(_, message: Message):
 
     # Allow /unafk and /forceafk commands to pass through
     if any(msg_text.startswith(cmd) for cmd in ["/unafk", "!unafk", "/forceafk", "!forceafk"]):
-        return
+        client.continue_propagation()
 
     active, data = await is_force_afk(user_id)
     if not active:
-        return
+        client.continue_propagation()
 
     # Delete the user's message silently
     try:
