@@ -54,6 +54,9 @@ auto_delete_collection = db.auto_delete  # For auto-delete settings and messages
 force_afk_collection = db.force_afk  # For force AFK users
 verification_groups_collection = db.verification_groups  # Managed through bot commands
 verification_pending_collection = db.verification_pending  # Pending join requests awaiting verification
+verification_events_collection = db.verification_events
+verification_actions_collection = db.verification_actions
+verification_settings_collection = db.verification_settings  # Global verification policy toggles
 
 # Helper functions
 def get_readable_time(seconds: int) -> str:
@@ -185,6 +188,17 @@ async def add_verification_group(chat_id: int, title: str):
 async def remove_verification_group(chat_id: int):
     await verification_groups_collection.delete_one({"chat_id": int(chat_id)})
     await verification_pending_collection.delete_many({"group_id": int(chat_id), "status": "pending"})
+
+async def get_same_ip_autoban_enabled() -> bool:
+    doc = await verification_settings_collection.find_one({"_id": "same_ip_auto_ban"})
+    return bool(doc.get("enabled", False)) if doc else False
+
+async def set_same_ip_autoban_enabled(enabled: bool):
+    await verification_settings_collection.update_one(
+        {"_id": "same_ip_auto_ban"},
+        {"$set": {"enabled": bool(enabled), "updated_at": datetime.now(), "updated_by": OWNER_ID}},
+        upsert=True,
+    )
 
 # =======================================================================
 # Auto-delete feature implementation (Per Group Settings)
@@ -672,6 +686,48 @@ async def verify_groups_command(_, message: Message):
         lines.append(f"{i}. **{g.get('title') or g['chat_id']}** — `{g['chat_id']}`")
     lines.append("\nUse /removeverifygroup inside a group to remove it.")
     await message.reply_text("\n".join(lines))
+
+
+@app.on_message(filters.command(["ipban", "ipautoban"]) & filters.user(OWNER_ID))
+async def ip_auto_ban_settings_command(_, message: Message):
+    enabled = await get_same_ip_autoban_enabled()
+    status = "🟢 ON" if enabled else "🔴 OFF"
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Turn ON", callback_data="vipsetting:ipban:on"),
+        InlineKeyboardButton("❌ Turn OFF", callback_data="vipsetting:ipban:off"),
+    ]])
+    await message.reply_text(
+        "🌐 **Same-IP Auto Ban**\n\n"
+        f"Status: **{status}**\n\n"
+        "ON → if the exact same IP was previously used by another verified Telegram ID, "
+        "the new join requester is automatically banned from the group being verified.\n\n"
+        "OFF → same-IP matches are sent to you for manual review with Approve / Ban buttons.\n\n"
+        "Exact-device + banned-ID protection remains active separately.",
+        reply_markup=keyboard,
+    )
+
+
+@app.on_callback_query(filters.regex(r"^vipsetting:ipban:(on|off)$"))
+async def ip_auto_ban_settings_callback(_, query: CallbackQuery):
+    if not query.from_user or int(query.from_user.id) != OWNER_ID:
+        await query.answer("Owner only.", show_alert=True)
+        return
+    enabled = (query.data or "").endswith(":on")
+    await set_same_ip_autoban_enabled(enabled)
+    status = "🟢 ON" if enabled else "🔴 OFF"
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Turn ON", callback_data="vipsetting:ipban:on"),
+        InlineKeyboardButton("❌ Turn OFF", callback_data="vipsetting:ipban:off"),
+    ]])
+    await query.message.edit_text(
+        "🌐 **Same-IP Auto Ban**\n\n"
+        f"Status: **{status}**\n\n"
+        "ON → same-IP match automatically bans the new requester from the group being verified.\n"
+        "OFF → same-IP match waits for your manual Approve / Ban decision.\n\n"
+        "Exact-device + banned-ID protection remains active separately.",
+        reply_markup=keyboard,
+    )
+    await query.answer("Setting updated.")
 
 
 async def send_join_verification_dm(join_request, group_name: str, group_id: int) -> bool:
@@ -1456,6 +1512,88 @@ async def broadcast_menu(_, message: Message):
     await track_message_for_deletion(sent_msg)
 
 # Callback handler for broadcast options
+@app.on_callback_query(filters.regex(r"^vip(ok|ban):(-?\d+):(\d+)$"))
+async def verification_ip_review_callback(_, query: CallbackQuery):
+    """Owner-only manual decision for same-IP verification alerts."""
+    if not query.from_user or int(query.from_user.id) != OWNER_ID:
+        await query.answer("Owner only.", show_alert=True)
+        return
+
+    match = re.match(r"^vip(ok|ban):(-?\d+):(\d+)$", query.data or "")
+    if not match:
+        await query.answer("Invalid action.", show_alert=True)
+        return
+
+    action, group_raw, user_raw = match.groups()
+    group_id = int(group_raw)
+    user_id = int(user_raw)
+
+    pending = await verification_pending_collection.find_one({
+        "group_id": group_id,
+        "user_id": user_id,
+        "status": "manual_review_ip",
+    })
+    if not pending:
+        await query.answer("Already processed or no longer pending.", show_alert=True)
+        return
+
+    now = datetime.now()
+    if action == "ok":
+        try:
+            await app.approve_chat_join_request(group_id, user_id)
+        except Exception as e:
+            logger.exception("Manual verification approval failed: %s", e)
+            await query.answer(f"Approval failed: {e}", show_alert=True)
+            return
+        new_status = "approved_manual_ip_review"
+        action_name = "manual_approve_same_ip"
+        result_text = "✅ Manually approved after same-IP review."
+    else:
+        try:
+            # A ban alone can leave Telegram's pending join request visible.
+            # Decline it first so another admin cannot approve the stale request.
+            try:
+                await app.decline_chat_join_request(group_id, user_id)
+            except Exception as decline_error:
+                logger.warning("Could not decline join request before ban for %s/%s: %s",
+                               group_id, user_id, decline_error)
+            await app.ban_chat_member(group_id, user_id)
+        except Exception as e:
+            logger.exception("Manual verification ban failed: %s", e)
+            await query.answer(f"Ban failed: {e}", show_alert=True)
+            return
+        new_status = "banned_manual_ip_review"
+        action_name = "manual_ban_same_ip"
+        result_text = "🚫 Manually banned after same-IP review."
+
+    await verification_pending_collection.update_one(
+        {"_id": pending["_id"], "status": "manual_review_ip"},
+        {"$set": {"status": new_status, "reviewed_at": now, "reviewed_by": OWNER_ID}},
+    )
+
+    event_id = pending.get("verification_event_id")
+    if event_id:
+        await verification_events_collection.update_one(
+            {"_id": event_id},
+            {"$set": {"decision": new_status, "reviewed_at": now, "reviewed_by": OWNER_ID}},
+        )
+
+    await verification_actions_collection.insert_one({
+        "event_id": event_id,
+        "telegram_user_id": user_id,
+        "group_id": group_id,
+        "action": action_name,
+        "reviewed_by": OWNER_ID,
+        "created_at": now,
+    })
+
+    try:
+        await query.edit_message_text((query.message.text or "") + f"\n\n{result_text}")
+    except Exception:
+        pass
+    await query.answer("Done.")
+
+
 @app.on_callback_query(filters.regex(r"^broadcast_option:(\w+):(\w+)$"))
 async def broadcast_option_handler(_, query: CallbackQuery):
     await query.answer()

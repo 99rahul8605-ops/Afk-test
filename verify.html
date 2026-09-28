@@ -400,6 +400,17 @@
           return;
         }
 
+        if(data.status==="manual_review"){
+          setProgress(100,"Under review");
+          setStatus(data.message||"Verification submitted for administrator review. Please wait for approval.","success");
+          verifyBtn.disabled=true;
+          verifyBtn.textContent="Pending Admin Review";
+          if(tg?.HapticFeedback){
+            tg.HapticFeedback.notificationOccurred("success");
+          }
+          return;
+        }
+
         if(!res.ok||!data.ok){
           throw new Error(data.message||"Verification could not be approved.");
         }
