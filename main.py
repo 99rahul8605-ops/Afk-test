@@ -11,7 +11,6 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 from typing import Optional
-from flask import Flask
 from pyrogram import Client, filters, enums, idle, ContinuePropagation
 from pyrogram.types import (
     Message, 
@@ -39,7 +38,7 @@ BOT_USERNAME = os.getenv("BOT_USERNAME")
 MONGODB_URI = os.getenv("MONGODB_URI")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
 PORT = int(os.getenv("PORT", 8080))
-VERIFY_URL = os.getenv("VERIFY_URL", "").strip().rstrip("/")
+VERIFY_URL = (os.getenv("VERIFY_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
 
 # Bot start time for uptime calculation
 START_TIME = time.time()
@@ -341,15 +340,12 @@ async def get_auto_delete_menu(chat_id: int):
 # End of auto-delete feature
 # =======================================================================
 
-# Create Flask server for health checks
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return "AFK Bot is running! 🚀", 200
+# Single web service: serve the verification Mini App/API and run the Telegram bot
+# in the same process. verification_server.py owns the Flask routes (/verify, /api/verify, /health).
+from verification_server import app as flask_app
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=PORT)
+    flask_app.run(host='0.0.0.0', port=PORT, threaded=True)
 
 # Bot initialization
 class Bot(Client):

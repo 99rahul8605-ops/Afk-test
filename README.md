@@ -34,7 +34,7 @@ Fingerprint/IP matching is probabilistic and can be affected by VPNs, proxies, m
 
 Copy `.env.example` values into your host's environment. Required bot values are `BOT_TOKEN`, `API_ID`, `API_HASH`, `BOT_USERNAME`, `MONGODB_URI`, and `OWNER_ID`.
 
-For verification, `VERIFY_URL` is required. Verification groups are added and removed directly through the bot, so no group ID environment variable is needed. The bot must be an admin with permission to approve join requests and ban users in each verification group.
+Verification groups are added and removed directly through the bot, so no group ID environment variable is needed. On Render, `VERIFY_URL` is detected automatically from `RENDER_EXTERNAL_URL`; you only need to set `VERIFY_URL` manually when hosting elsewhere. The bot must be an admin with permission to approve join requests and ban users in each verification group.
 
 ## Install
 
@@ -56,7 +56,7 @@ Run the verification web service separately:
 python3 verification_server.py
 ```
 
-The bot health server defaults to port `8080`; verification defaults to `8081`. Reverse-proxy a public HTTPS domain/subdomain to port 8081 and set that public base URL as `VERIFY_URL`.
+The Telegram bot and verification web app now run in one web service on the same Render port. The verification page is available at `/verify`, and Render automatically supplies the public base URL through `RENDER_EXTERNAL_URL`.
 
 Example:
 
@@ -90,4 +90,4 @@ Existing AFK collections remain unchanged.
 
 ## Render note
 
-The AFK bot and verification web app need separate public services because the verification Mini App must have its own reachable HTTPS endpoint. In the included `render.yaml`, the AFK bot now gets `VERIFY_URL` automatically from the `afk-verification` service's Render-provided `RENDER_EXTERNAL_URL`, so you do not need to type the verification URL manually. Use the same bot token and MongoDB URI for both services.
+The included `render.yaml` deploys a single Render Web Service. `main.py` runs the Telegram bot and starts the verification Flask app in the same process, so there is only one Render URL and no cross-service `VERIFY_URL` mapping.

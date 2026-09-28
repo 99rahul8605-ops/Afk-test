@@ -17,25 +17,6 @@ services:
         sync: false
       - key: OWNER_ID
         sync: false
-      - key: VERIFY_URL
-        fromService:
-          type: web
-          name: afk-verification
-          envVarKey: RENDER_EXTERNAL_URL
-
-  - type: web
-    name: afk-verification
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python verification_server.py
-    envVars:
-      - key: BOT_TOKEN
-        sync: false
-      - key: MONGODB_URI
-        sync: false
-      - key: OWNER_ID
-        sync: false
       - key: AUTO_BAN_HIGH_RISK
         value: "true"
       - key: TRUST_PROXY_HEADERS
