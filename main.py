@@ -6,6 +6,9 @@ import asyncio
 import threading
 import random
 import string
+import json
+import urllib.request
+import urllib.error
 from datetime import datetime
 from typing import Optional
 from flask import Flask
@@ -675,6 +678,93 @@ async def verify_groups_command(_, message: Message):
     await message.reply_text("\n".join(lines))
 
 
+async def send_join_verification_dm(join_request, group_name: str, group_id: int) -> bool:
+    """Send the verification DM using Telegram Bot API's temporary user_chat_id.
+
+    Telegram explicitly allows a bot admin to contact a join requester through
+    user_chat_id for a short window, even if the user has never started the bot.
+    Pyrogram/MTProto can be unreliable for this temporary peer, so Bot API is
+    used first and Pyrogram is retained as a fallback for users who already
+    opened the bot.
+    """
+    user_id = int(join_request.from_user.id)
+    user_chat_id = getattr(join_request, "user_chat_id", None)
+    verify_url = verification_webapp_url(group_id)
+    text = (
+        "🔐 Verification Required\n\n"
+        f"Group: {group_name}\n\n"
+        "Verification is compulsory to be approved in this group.\n\n"
+        "✅ Secure device verification\n"
+        "⚡ Takes only a few seconds\n\n"
+        "Tap the button below to continue."
+    )
+    button_text = f"✅ Verify for {group_name}"[:64]
+
+    if user_chat_id:
+        payload = {
+            "chat_id": int(user_chat_id),
+            "text": text,
+            "reply_markup": {
+                "inline_keyboard": [[{
+                    "text": button_text,
+                    "web_app": {"url": verify_url},
+                }]]
+            },
+        }
+
+        def _send_bot_api():
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                return resp.status, body
+
+        try:
+            status, body = await asyncio.to_thread(_send_bot_api)
+            if 200 <= int(status) < 300:
+                logger.info(
+                    f"Verification DM sent via Bot API to join requester {user_id} "
+                    f"(user_chat_id={user_chat_id}, group={group_id})"
+                )
+                return True
+            logger.warning(f"Bot API verification DM failed [{status}]: {body}")
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = str(e)
+            logger.warning(
+                f"Bot API verification DM failed for {user_id} "
+                f"(user_chat_id={user_chat_id}): HTTP {e.code} {body}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Bot API verification DM error for {user_id} "
+                f"(user_chat_id={user_chat_id}): {e}"
+            )
+    else:
+        logger.warning(
+            f"Join request for {user_id} did not contain user_chat_id; "
+            "trying normal private user ID fallback"
+        )
+
+    # Fallback works if the user has already opened/started the bot.
+    try:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(button_text, web_app=WebAppInfo(url=verify_url))
+        ]])
+        await app.send_message(user_id, text, reply_markup=keyboard)
+        logger.info(f"Verification DM sent via Pyrogram fallback to {user_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not DM join requester {user_id} using fallback: {e}")
+        return False
+
+
 @app.on_chat_join_request()
 async def verification_join_request(_, join_request):
     group_id = int(join_request.chat.id)
@@ -700,25 +790,14 @@ async def verification_join_request(_, join_request):
         return
 
     group_name = join_request.chat.title or enabled.get("title") or "this group"
-    text = (
-        "🔐 **Verification Required**\n\n"
-        f"**Group:** {group_name}\n\n"
-        "Verification is compulsory to be approved in this group.\n\n"
-        "✅ Secure device verification\n"
-        "⚡ Takes only a few seconds\n\n"
-        "Tap the button below to continue."
+    sent = await send_join_verification_dm(join_request, group_name, group_id)
+    await verification_pending_collection.update_one(
+        {"group_id": group_id, "user_id": user_id},
+        {"$set": {
+            "dm_sent": bool(sent),
+            "dm_attempted_at": datetime.now(),
+        }},
     )
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            f"✅ Verify for {group_name}"[:64],
-            web_app=WebAppInfo(url=verification_webapp_url(group_id)),
-        )
-    ]])
-    try:
-        # Telegram provides user_chat_id for join requests so the bot can contact the requester.
-        await app.send_message(join_request.user_chat_id, text, reply_markup=keyboard)
-    except Exception as e:
-        logger.warning(f"Could not DM join requester {user_id}: {e}")
 
 
 @app.on_message(filters.command(["verify"]))
