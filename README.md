@@ -1,93 +1,101 @@
-# Advanced AFK Bot + Verification Mini App
+<p align="center">
+  <img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
+</p>
 
-This merged package contains the original AFK bot plus the AFK Verification add-on.
+<h1 align="center">🤖 Advanced AFK Bot</h1>
+<p align="center">
+  A smart Telegram bot to set AFK (Away From Keyboard) statuses with text, images, GIFs, or stickers.  
+  It automatically notifies others when you are AFK and when you return.
+</p>
 
-## Main AFK features
+<p align="center">
+  <a href="https://t.me/team_secrat_bots">
+    <img src="https://img.shields.io/badge/Support%20Group-Join-orange?style=for-the-badge&logo=telegram" alt="Support Group">
+  </a>
+</p>
 
-- `/afk` or `brb` with optional reason.
-- AFK with replied photo/GIF/sticker media.
-- Mention/reply detection with AFK reason and elapsed duration.
-- Automatic AFK removal when the user returns.
-- Persistent MongoDB AFK storage.
-- Force AFK: `/forceafk` auto-deletes that user's group messages until `/unafk`.
-- Per-group bot-message auto-delete settings with 5/10/30/60 minute presets.
-- User/group tracking and bot statistics.
-- Top AFK leaderboard based on accumulated AFK time.
-- Owner broadcast tools for users/groups, including pin options.
-- Flask health endpoint for hosting/uptime checks.
+<p align="center">
+  <img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
+</p>
 
-## Verification add-on features
+---
 
-- `/verify` and a private-chat **Verify User** Mini App button when `VERIFY_URL` is configured.
-- Server-side Telegram Mini App `initData` signature validation; browser-supplied Telegram IDs are not trusted.
-- Stores verification events in the same `afk_db` MongoDB database.
-- Browser/device fingerprint and request IP signals for repeat-account abuse checks.
-- Coarse IP geolocation (city/state/country when available) with cache.
-- Checks matched historical Telegram IDs against configured groups using Telegram `getChatMember`.
-- Only treats an old account as banned when Telegram currently reports it as `kicked`.
-- Device-ban inheritance: if the exact device fingerprint was previously used by any Telegram ID that is currently banned in a configured group, the new ID is auto-banned; otherwise it is approved. IP alone never auto-bans.
-- Optional automatic ban across verification groups and detailed owner alerts.
+## ✨ Features
 
-Fingerprint/IP matching is probabilistic and can be affected by VPNs, proxies, mobile networks, CGNAT, shared devices, or browser changes. It should be treated as an abuse-prevention signal rather than identity proof.
+- 📝 **Set AFK** with:
+  - 💬 Text reason (`/afk reason here`)
+  - 🖼️ Reply to media (photo/GIF/sticker) with `/afk` to set media AFK
+  - ⚡ Quick AFK with `/afk` or `brb`
+- ⏱️ AFK reason & duration shown to people who:
+  - 📢 Mention you
+  - 💬 Reply to your messages
+- 🔄 Auto-remove AFK when you send any message
+- 👥 Works in **groups** and **private chats**
+- 📩 Startup notification to the bot owner
+- 💾 MongoDB-based persistent AFK storage
+- 🌐 **Flask health check server** (for uptime monitoring)
+- 📎 Group invite button
 
-## Environment
+---
 
-Copy `.env.example` values into your host's environment. Required bot values are `BOT_TOKEN`, `API_ID`, `API_HASH`, `BOT_USERNAME`, `MONGODB_URI`, and `OWNER_ID`.
+## 📦 Requirements
 
-Verification groups are added and removed directly through the bot, so no group ID environment variable is needed. On Render, `VERIFY_URL` is detected automatically from `RENDER_EXTERNAL_URL`; you only need to set `VERIFY_URL` manually when hosting elsewhere. The bot must be an admin with permission to approve join requests and ban users in each verification group.
+- 🐍 Python 3.9+
+- 🍃 MongoDB database
+- 🤖 Telegram Bot Token from [@BotFather](https://t.me/BotFather)
+- 🔑 Telegram API ID & API Hash from [my.telegram.org](https://my.telegram.org)
 
-## Install
+---
 
-```bash
-pip install -r requirements.txt
-```
+## ⚙️ Environment Variables
 
-## Run on VPS
+| Variable       | Required | Description                                                                 |
+|----------------|----------|-----------------------------------------------------------------------------|
+| `BOT_TOKEN`    | ✅ Yes    | 🤖 Bot token from [@BotFather](https://t.me/BotFather)                        |
+| `API_ID`       | ✅ Yes    | 📌 API ID from [my.telegram.org](https://my.telegram.org)                     |
+| `API_HASH`     | ✅ Yes    | 🔑 API Hash from [my.telegram.org](https://my.telegram.org)                   |
+| `BOT_USERNAME` | ✅ Yes    | 📛 Your bot username (without @)                                             |
+| `MONGODB_URI`  | ✅ Yes    | 🍃 MongoDB connection URI                                                     |
+| `OWNER_ID`     | ✅ Yes    | 👤 Your Telegram numeric ID (can get from [@userinfobot](https://t.me/userinfobot)) |
+| `PORT`         | ❌ No     | 🌐 Flask server port (default: `8080`)                                       |
 
-Run the AFK bot:
+---
 
-```bash
-python3 main.py
-```
+## 🚀 Deploy
 
-Run the verification web service separately:
+### ☁️ Deploy to Render (One-Click)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
 
-```bash
-python3 verification_server.py
-```
+---
 
-The Telegram bot and verification web app now run in one web service on the same Render port. The verification page is available at `/verify`, and Render automatically supplies the public base URL through `RENDER_EXTERNAL_URL`.
+### ☁️ Deploy to Heroku (One-Click)
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy)
 
-Example:
+---
 
-```env
-VERIFY_URL=https://verify.example.com
-```
+## 📚 Commands
 
-Then add the bot as an admin in the target group and run `/addverifygroup` there. Use `/removeverifygroup` to remove it and `/verifygroups` to list all configured groups. New join requests are held until verification succeeds; successful verification triggers Telegram join-request approval automatically.
+| Command           | Description                               |
+|-------------------|-------------------------------------------|
+| `/start` or `/help` | 📖 Show help menu                         |
+| `/afk`             | 📝 Set AFK with optional reason           |
+| `brb`              | ⚡ Quick AFK with optional reason         |
 
-## Verification collections
+💡 Tip: Reply to a **photo**, **GIF**, or **sticker** with `/afk` to set media AFK.
 
-The add-on uses these collections under `afk_db`:
+---
 
-- `verification_events`
-- `verification_actions`
-- `verification_ip_geo_cache`
-- `verification_groups`
-- `verification_pending`
+## 🔗 Support
 
-Existing AFK collections remain unchanged.
+If you need help or want to suggest features, join our support group:  
+[![Support Group](https://img.shields.io/badge/Support%20Group-Join-orange?style=for-the-badge&logo=telegram)](https://t.me/team_secrat_bots)
 
-## Files
+---
 
-- `main.py` — AFK bot
-- `verification_server.py` — verification API/web server
-- `verify.html` — Telegram Mini App UI
-- `.env.example` — combined environment template
-- `VERIFICATION_SETUP.md` — detailed verification notes
-- `requirements.txt` — combined dependencies
-- `Dockerfile`, `render.yaml` — deployment files
+<p align="center">
+  <img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
+</p>
 
-## Render note
+## 📝 License
 
-The included `render.yaml` deploys a single Render Web Service. `main.py` runs the Telegram bot and starts the verification Flask app in the same process, so there is only one Render URL and no cross-service `VERIFY_URL` mapping.
+📄 This project is licensed under the **MIT License**.

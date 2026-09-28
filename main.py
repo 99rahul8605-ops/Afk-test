@@ -6,19 +6,15 @@ import asyncio
 import threading
 import random
 import string
-import json
-import urllib.request
-import urllib.error
 from datetime import datetime
-from typing import Optional
+from flask import Flask
 from pyrogram import Client, filters, enums, idle, ContinuePropagation
 from pyrogram.types import (
     Message, 
     InlineKeyboardMarkup, 
     InlineKeyboardButton, 
     InputMediaPhoto,
-    CallbackQuery,
-    WebAppInfo
+    CallbackQuery
 )
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram.errors import PeerIdInvalid, ChatAdminRequired
@@ -38,7 +34,6 @@ BOT_USERNAME = os.getenv("BOT_USERNAME")
 MONGODB_URI = os.getenv("MONGODB_URI")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
 PORT = int(os.getenv("PORT", 8080))
-VERIFY_URL = (os.getenv("VERIFY_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
 
 # Bot start time for uptime calculation
 START_TIME = time.time()
@@ -52,11 +47,6 @@ groups_collection = db.groups  # For tracking groups
 broadcast_collection = db.broadcast_tmp  # For temporary broadcast data
 auto_delete_collection = db.auto_delete  # For auto-delete settings and messages
 force_afk_collection = db.force_afk  # For force AFK users
-verification_groups_collection = db.verification_groups  # Managed through bot commands
-verification_pending_collection = db.verification_pending  # Pending join requests awaiting verification
-verification_events_collection = db.verification_events
-verification_actions_collection = db.verification_actions
-verification_settings_collection = db.verification_settings  # Global verification policy toggles
 
 # Helper functions
 def get_readable_time(seconds: int) -> str:
@@ -163,42 +153,6 @@ async def get_all_groups():
     async for group in groups_collection.find({}):
         groups.append(group)
     return groups
-
-async def get_verification_groups():
-    groups = []
-    async for group in verification_groups_collection.find({"enabled": {"$ne": False}}).sort("added_at", 1):
-        groups.append(group)
-    return groups
-
-async def get_verification_group_ids():
-    return [int(g["chat_id"]) for g in await get_verification_groups()]
-
-async def add_verification_group(chat_id: int, title: str):
-    await verification_groups_collection.update_one(
-        {"chat_id": int(chat_id)},
-        {"$set": {
-            "chat_id": int(chat_id),
-            "title": title or str(chat_id),
-            "enabled": True,
-            "added_at": datetime.now(),
-        }},
-        upsert=True,
-    )
-
-async def remove_verification_group(chat_id: int):
-    await verification_groups_collection.delete_one({"chat_id": int(chat_id)})
-    await verification_pending_collection.delete_many({"group_id": int(chat_id), "status": "pending"})
-
-async def get_same_ip_autoban_enabled() -> bool:
-    doc = await verification_settings_collection.find_one({"_id": "same_ip_auto_ban"})
-    return bool(doc.get("enabled", False)) if doc else False
-
-async def set_same_ip_autoban_enabled(enabled: bool):
-    await verification_settings_collection.update_one(
-        {"_id": "same_ip_auto_ban"},
-        {"$set": {"enabled": bool(enabled), "updated_at": datetime.now(), "updated_by": OWNER_ID}},
-        upsert=True,
-    )
 
 # =======================================================================
 # Auto-delete feature implementation (Per Group Settings)
@@ -354,12 +308,15 @@ async def get_auto_delete_menu(chat_id: int):
 # End of auto-delete feature
 # =======================================================================
 
-# Single web service: serve the verification Mini App/API and run the Telegram bot
-# in the same process. verification_server.py owns the Flask routes (/verify, /api/verify, /health).
-from verification_server import app as flask_app
+# Create Flask server for health checks
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "AFK Bot is running! 🚀", 200
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=PORT, threaded=True)
+    flask_app.run(host='0.0.0.0', port=PORT)
 
 # Bot initialization
 class Bot(Client):
@@ -503,8 +460,7 @@ async def start_command(_, message: Message):
             ],
             [
                 InlineKeyboardButton("Support Group", url="https://t.me/team_secrat_bots")
-            ],
-            *([[InlineKeyboardButton("✅ Verify User", web_app=WebAppInfo(url=f"{VERIFY_URL}/verify"))]] if VERIFY_URL and message.chat.type == enums.ChatType.PRIVATE else [])
+            ]
         ]
     )
     
@@ -551,7 +507,6 @@ async def help_callback(_, query):
 - /autodel - Configure auto-delete settings for this group (Admins only)
 - /forceafk - Enable Force AFK (your messages get deleted until /unafk)
 - /unafk - Disable Force AFK mode
-- /verify - Open the verification Mini App (when VERIFY_URL is configured)
 """
     
     await query.message.edit_text(
@@ -582,8 +537,7 @@ async def back_callback(_, query):
             ],
             [
                 InlineKeyboardButton("Support Group", url="https://t.me/team_secrat_bots")
-            ],
-            *([[InlineKeyboardButton("✅ Verify User", web_app=WebAppInfo(url=f"{VERIFY_URL}/verify"))]] if VERIFY_URL and query.message.chat.type == enums.ChatType.PRIVATE else [])
+            ]
         ]
     )
     
@@ -602,292 +556,6 @@ Use /help for more info.
             caption=text
         ),
         reply_markup=keyboard
-    )
-
-# Verification Mini App launcher
-async def get_verification_group_name(group_id: Optional[int] = None) -> str:
-    """Fetch a verification group's current Telegram title, with DB fallback."""
-    if group_id is None:
-        groups = await get_verification_groups()
-        if not groups:
-            return "this group"
-        group_id = int(groups[0]["chat_id"])
-    try:
-        chat = await app.get_chat(int(group_id))
-        title = getattr(chat, "title", None) or "this group"
-        await verification_groups_collection.update_one(
-            {"chat_id": int(group_id)}, {"$set": {"title": title}}
-        )
-        return title
-    except Exception as e:
-        doc = await verification_groups_collection.find_one({"chat_id": int(group_id)})
-        if doc and doc.get("title"):
-            return doc["title"]
-        logger.warning(f"Could not fetch verification group title: {e}")
-        return "this group"
-
-
-def verification_webapp_url(group_id: int) -> str:
-    return f"{VERIFY_URL}/verify?group_id={int(group_id)}"
-
-
-@app.on_message(filters.command(["addverifygroup"]) & filters.user(OWNER_ID))
-async def add_verify_group_command(_, message: Message):
-    if message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-        await message.reply_text("Add me to the target group as an admin, then run /addverifygroup there.")
-        return
-    try:
-        bot_user = await app.get_me()
-        me = await app.get_chat_member(message.chat.id, bot_user.id)
-        if me.status not in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]:
-            await message.reply_text("❌ Make me an admin first. I need permission to approve join requests and ban users.")
-            return
-    except Exception:
-        await message.reply_text("❌ I could not verify my admin permissions in this group.")
-        return
-    await add_verification_group(message.chat.id, message.chat.title or str(message.chat.id))
-    await message.reply_text(
-        f"✅ **Verification enabled for this group.**\n\n"
-        f"Group: **{message.chat.title or message.chat.id}**\n"
-        f"ID: `{message.chat.id}`\n\n"
-        "New join requests will be sent to verification before approval."
-    )
-
-
-@app.on_message(filters.command(["removeverifygroup"]) & filters.user(OWNER_ID))
-async def remove_verify_group_command(_, message: Message):
-    target_id = None
-    if message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-        target_id = message.chat.id
-    elif len(message.command) > 1:
-        try:
-            target_id = int(message.command[1])
-        except Exception:
-            pass
-    if target_id is None:
-        await message.reply_text("Use /removeverifygroup inside the group, or /removeverifygroup <group_id> in DM.")
-        return
-    doc = await verification_groups_collection.find_one({"chat_id": int(target_id)})
-    if not doc:
-        await message.reply_text("❌ That group is not in the verification list.")
-        return
-    await remove_verification_group(int(target_id))
-    await message.reply_text(f"✅ Removed **{doc.get('title') or target_id}** (`{target_id}`) from verification.")
-
-
-@app.on_message(filters.command(["verifygroups"]) & filters.user(OWNER_ID))
-async def verify_groups_command(_, message: Message):
-    groups = await get_verification_groups()
-    if not groups:
-        await message.reply_text("No verification groups added yet. Run /addverifygroup inside a group.")
-        return
-    lines = ["🔐 **Verification Groups**", ""]
-    for i, g in enumerate(groups, 1):
-        lines.append(f"{i}. **{g.get('title') or g['chat_id']}** — `{g['chat_id']}`")
-    lines.append("\nUse /removeverifygroup inside a group to remove it.")
-    await message.reply_text("\n".join(lines))
-
-
-@app.on_message(filters.command(["ipban", "ipautoban"]) & filters.user(OWNER_ID))
-async def ip_auto_ban_settings_command(_, message: Message):
-    enabled = await get_same_ip_autoban_enabled()
-    status = "🟢 ON" if enabled else "🔴 OFF"
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Turn ON", callback_data="vipsetting:ipban:on"),
-        InlineKeyboardButton("❌ Turn OFF", callback_data="vipsetting:ipban:off"),
-    ]])
-    await message.reply_text(
-        "🌐 **Same-IP Auto Ban**\n\n"
-        f"Status: **{status}**\n\n"
-        "ON → if the exact same IP was previously used by another verified Telegram ID, "
-        "the new join requester is automatically banned from the group being verified.\n\n"
-        "OFF → same-IP matches are sent to you for manual review with Approve / Ban buttons.\n\n"
-        "Exact-device + banned-ID protection remains active separately.",
-        reply_markup=keyboard,
-    )
-
-
-@app.on_callback_query(filters.regex(r"^vipsetting:ipban:(on|off)$"))
-async def ip_auto_ban_settings_callback(_, query: CallbackQuery):
-    if not query.from_user or int(query.from_user.id) != OWNER_ID:
-        await query.answer("Owner only.", show_alert=True)
-        return
-    enabled = (query.data or "").endswith(":on")
-    await set_same_ip_autoban_enabled(enabled)
-    status = "🟢 ON" if enabled else "🔴 OFF"
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Turn ON", callback_data="vipsetting:ipban:on"),
-        InlineKeyboardButton("❌ Turn OFF", callback_data="vipsetting:ipban:off"),
-    ]])
-    await query.message.edit_text(
-        "🌐 **Same-IP Auto Ban**\n\n"
-        f"Status: **{status}**\n\n"
-        "ON → same-IP match automatically bans the new requester from the group being verified.\n"
-        "OFF → same-IP match waits for your manual Approve / Ban decision.\n\n"
-        "Exact-device + banned-ID protection remains active separately.",
-        reply_markup=keyboard,
-    )
-    await query.answer("Setting updated.")
-
-
-async def send_join_verification_dm(join_request, group_name: str, group_id: int) -> bool:
-    """Send the verification DM using Telegram Bot API's temporary user_chat_id.
-
-    Telegram explicitly allows a bot admin to contact a join requester through
-    user_chat_id for a short window, even if the user has never started the bot.
-    Pyrogram/MTProto can be unreliable for this temporary peer, so Bot API is
-    used first and Pyrogram is retained as a fallback for users who already
-    opened the bot.
-    """
-    user_id = int(join_request.from_user.id)
-    user_chat_id = getattr(join_request, "user_chat_id", None)
-    verify_url = verification_webapp_url(group_id)
-    text = (
-        "🔐 Verification Required\n\n"
-        f"Group: {group_name}\n\n"
-        "Verification is compulsory to be approved in this group.\n\n"
-        "✅ Secure device verification\n"
-        "⚡ Takes only a few seconds\n\n"
-        "Tap the button below to continue."
-    )
-    button_text = f"✅ Verify for {group_name}"[:64]
-
-    if user_chat_id:
-        payload = {
-            "chat_id": int(user_chat_id),
-            "text": text,
-            "reply_markup": {
-                "inline_keyboard": [[{
-                    "text": button_text,
-                    "web_app": {"url": verify_url},
-                }]]
-            },
-        }
-
-        def _send_bot_api():
-            req = urllib.request.Request(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-                return resp.status, body
-
-        try:
-            status, body = await asyncio.to_thread(_send_bot_api)
-            if 200 <= int(status) < 300:
-                logger.info(
-                    f"Verification DM sent via Bot API to join requester {user_id} "
-                    f"(user_chat_id={user_chat_id}, group={group_id})"
-                )
-                return True
-            logger.warning(f"Bot API verification DM failed [{status}]: {body}")
-        except urllib.error.HTTPError as e:
-            try:
-                body = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                body = str(e)
-            logger.warning(
-                f"Bot API verification DM failed for {user_id} "
-                f"(user_chat_id={user_chat_id}): HTTP {e.code} {body}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Bot API verification DM error for {user_id} "
-                f"(user_chat_id={user_chat_id}): {e}"
-            )
-    else:
-        logger.warning(
-            f"Join request for {user_id} did not contain user_chat_id; "
-            "trying normal private user ID fallback"
-        )
-
-    # Fallback works if the user has already opened/started the bot.
-    try:
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton(button_text, web_app=WebAppInfo(url=verify_url))
-        ]])
-        await app.send_message(user_id, text, reply_markup=keyboard)
-        logger.info(f"Verification DM sent via Pyrogram fallback to {user_id}")
-        return True
-    except Exception as e:
-        logger.warning(f"Could not DM join requester {user_id} using fallback: {e}")
-        return False
-
-
-@app.on_chat_join_request()
-async def verification_join_request(_, join_request):
-    group_id = int(join_request.chat.id)
-    enabled = await verification_groups_collection.find_one({"chat_id": group_id, "enabled": {"$ne": False}})
-    if not enabled:
-        return
-
-    user_id = int(join_request.from_user.id)
-    await verification_pending_collection.update_one(
-        {"group_id": group_id, "user_id": user_id},
-        {"$set": {
-            "group_id": group_id,
-            "group_title": join_request.chat.title or enabled.get("title") or str(group_id),
-            "user_id": user_id,
-            "status": "pending",
-            "requested_at": datetime.now(),
-        }},
-        upsert=True,
-    )
-
-    if not VERIFY_URL:
-        logger.warning("VERIFY_URL is not configured; cannot send verification link")
-        return
-
-    group_name = join_request.chat.title or enabled.get("title") or "this group"
-    sent = await send_join_verification_dm(join_request, group_name, group_id)
-    await verification_pending_collection.update_one(
-        {"group_id": group_id, "user_id": user_id},
-        {"$set": {
-            "dm_sent": bool(sent),
-            "dm_attempted_at": datetime.now(),
-        }},
-    )
-
-
-@app.on_message(filters.command(["verify"]))
-async def verify_command(_, message: Message):
-    if not VERIFY_URL:
-        await message.reply_text("❌ Verification URL is not configured yet.")
-        return
-    if message.chat.type != enums.ChatType.PRIVATE:
-        await message.reply_text("🔐 Open the bot in private chat and send /verify.")
-        return
-
-    pending = await verification_pending_collection.find_one(
-        {"user_id": message.from_user.id, "status": "pending"},
-        sort=[("requested_at", -1)],
-    )
-    if pending:
-        group_id = int(pending["group_id"])
-    else:
-        groups = await get_verification_groups()
-        if not groups:
-            await message.reply_text("❌ No verification group has been configured yet.")
-            return
-        group_id = int(groups[0]["chat_id"])
-
-    group_name = await get_verification_group_name(group_id)
-    await message.reply_text(
-        f"🔐 **Verification Required**\n\n"
-        f"**Group:** {group_name}\n\n"
-        "Verification is compulsory to be approved in this group.\n\n"
-        "✅ Secure device verification\n"
-        "⚡ Takes only a few seconds\n\n"
-        "Tap the button below to continue.",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                f"✅ Verify for {group_name}"[:64] if group_name != "this group" else "✅ Verify Now",
-                web_app=WebAppInfo(url=verification_webapp_url(group_id))
-            )
-        ]])
     )
 
 # AFK handler
@@ -1512,88 +1180,6 @@ async def broadcast_menu(_, message: Message):
     await track_message_for_deletion(sent_msg)
 
 # Callback handler for broadcast options
-@app.on_callback_query(filters.regex(r"^vip(ok|ban):(-?\d+):(\d+)$"))
-async def verification_ip_review_callback(_, query: CallbackQuery):
-    """Owner-only manual decision for same-IP verification alerts."""
-    if not query.from_user or int(query.from_user.id) != OWNER_ID:
-        await query.answer("Owner only.", show_alert=True)
-        return
-
-    match = re.match(r"^vip(ok|ban):(-?\d+):(\d+)$", query.data or "")
-    if not match:
-        await query.answer("Invalid action.", show_alert=True)
-        return
-
-    action, group_raw, user_raw = match.groups()
-    group_id = int(group_raw)
-    user_id = int(user_raw)
-
-    pending = await verification_pending_collection.find_one({
-        "group_id": group_id,
-        "user_id": user_id,
-        "status": "manual_review_ip",
-    })
-    if not pending:
-        await query.answer("Already processed or no longer pending.", show_alert=True)
-        return
-
-    now = datetime.now()
-    if action == "ok":
-        try:
-            await app.approve_chat_join_request(group_id, user_id)
-        except Exception as e:
-            logger.exception("Manual verification approval failed: %s", e)
-            await query.answer(f"Approval failed: {e}", show_alert=True)
-            return
-        new_status = "approved_manual_ip_review"
-        action_name = "manual_approve_same_ip"
-        result_text = "✅ Manually approved after same-IP review."
-    else:
-        try:
-            # A ban alone can leave Telegram's pending join request visible.
-            # Decline it first so another admin cannot approve the stale request.
-            try:
-                await app.decline_chat_join_request(group_id, user_id)
-            except Exception as decline_error:
-                logger.warning("Could not decline join request before ban for %s/%s: %s",
-                               group_id, user_id, decline_error)
-            await app.ban_chat_member(group_id, user_id)
-        except Exception as e:
-            logger.exception("Manual verification ban failed: %s", e)
-            await query.answer(f"Ban failed: {e}", show_alert=True)
-            return
-        new_status = "banned_manual_ip_review"
-        action_name = "manual_ban_same_ip"
-        result_text = "🚫 Manually banned after same-IP review."
-
-    await verification_pending_collection.update_one(
-        {"_id": pending["_id"], "status": "manual_review_ip"},
-        {"$set": {"status": new_status, "reviewed_at": now, "reviewed_by": OWNER_ID}},
-    )
-
-    event_id = pending.get("verification_event_id")
-    if event_id:
-        await verification_events_collection.update_one(
-            {"_id": event_id},
-            {"$set": {"decision": new_status, "reviewed_at": now, "reviewed_by": OWNER_ID}},
-        )
-
-    await verification_actions_collection.insert_one({
-        "event_id": event_id,
-        "telegram_user_id": user_id,
-        "group_id": group_id,
-        "action": action_name,
-        "reviewed_by": OWNER_ID,
-        "created_at": now,
-    })
-
-    try:
-        await query.edit_message_text((query.message.text or "") + f"\n\n{result_text}")
-    except Exception:
-        pass
-    await query.answer("Done.")
-
-
 @app.on_callback_query(filters.regex(r"^broadcast_option:(\w+):(\w+)$"))
 async def broadcast_option_handler(_, query: CallbackQuery):
     await query.answer()
