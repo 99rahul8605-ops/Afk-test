@@ -7,6 +7,7 @@ import threading
 import random
 import string
 from datetime import datetime
+from typing import Optional
 from flask import Flask
 from pyrogram import Client, filters, enums, idle, ContinuePropagation
 from pyrogram.types import (
@@ -591,7 +592,7 @@ Use /help for more info.
     )
 
 # Verification Mini App launcher
-async def get_verification_group_name(group_id: int | None = None) -> str:
+async def get_verification_group_name(group_id: Optional[int] = None) -> str:
     """Fetch a verification group's current Telegram title, with DB fallback."""
     if group_id is None:
         groups = await get_verification_groups()

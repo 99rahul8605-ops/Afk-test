@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from flask import Flask, jsonify, request, send_from_directory
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -102,7 +103,7 @@ def is_configured_group(group_id: int) -> bool:
 # Telegram helpers
 # ============================================================
 
-def telegram_api(method: str, payload: dict | None = None, timeout: int = 12):
+def telegram_api(method: str, payload: Optional[dict] = None, timeout: int = 12):
     """Call Telegram Bot API without starting another Pyrogram client."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     data = urllib.parse.urlencode(payload or {}).encode("utf-8")
