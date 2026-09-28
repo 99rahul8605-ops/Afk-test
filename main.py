@@ -14,7 +14,8 @@ from pyrogram.types import (
     InlineKeyboardMarkup, 
     InlineKeyboardButton, 
     InputMediaPhoto,
-    CallbackQuery
+    CallbackQuery,
+    WebAppInfo
 )
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram.errors import PeerIdInvalid, ChatAdminRequired
@@ -34,6 +35,7 @@ BOT_USERNAME = os.getenv("BOT_USERNAME")
 MONGODB_URI = os.getenv("MONGODB_URI")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
 PORT = int(os.getenv("PORT", 8080))
+VERIFY_URL = os.getenv("VERIFY_URL", "").strip().rstrip("/")
 
 # Bot start time for uptime calculation
 START_TIME = time.time()
@@ -47,6 +49,8 @@ groups_collection = db.groups  # For tracking groups
 broadcast_collection = db.broadcast_tmp  # For temporary broadcast data
 auto_delete_collection = db.auto_delete  # For auto-delete settings and messages
 force_afk_collection = db.force_afk  # For force AFK users
+verification_groups_collection = db.verification_groups  # Managed through bot commands
+verification_pending_collection = db.verification_pending  # Pending join requests awaiting verification
 
 # Helper functions
 def get_readable_time(seconds: int) -> str:
@@ -153,6 +157,31 @@ async def get_all_groups():
     async for group in groups_collection.find({}):
         groups.append(group)
     return groups
+
+async def get_verification_groups():
+    groups = []
+    async for group in verification_groups_collection.find({"enabled": {"$ne": False}}).sort("added_at", 1):
+        groups.append(group)
+    return groups
+
+async def get_verification_group_ids():
+    return [int(g["chat_id"]) for g in await get_verification_groups()]
+
+async def add_verification_group(chat_id: int, title: str):
+    await verification_groups_collection.update_one(
+        {"chat_id": int(chat_id)},
+        {"$set": {
+            "chat_id": int(chat_id),
+            "title": title or str(chat_id),
+            "enabled": True,
+            "added_at": datetime.now(),
+        }},
+        upsert=True,
+    )
+
+async def remove_verification_group(chat_id: int):
+    await verification_groups_collection.delete_one({"chat_id": int(chat_id)})
+    await verification_pending_collection.delete_many({"group_id": int(chat_id), "status": "pending"})
 
 # =======================================================================
 # Auto-delete feature implementation (Per Group Settings)
@@ -460,7 +489,8 @@ async def start_command(_, message: Message):
             ],
             [
                 InlineKeyboardButton("Support Group", url="https://t.me/team_secrat_bots")
-            ]
+            ],
+            *([[InlineKeyboardButton("✅ Verify User", web_app=WebAppInfo(url=f"{VERIFY_URL}/verify"))]] if VERIFY_URL and message.chat.type == enums.ChatType.PRIVATE else [])
         ]
     )
     
@@ -507,6 +537,7 @@ async def help_callback(_, query):
 - /autodel - Configure auto-delete settings for this group (Admins only)
 - /forceafk - Enable Force AFK (your messages get deleted until /unafk)
 - /unafk - Disable Force AFK mode
+- /verify - Open the verification Mini App (when VERIFY_URL is configured)
 """
     
     await query.message.edit_text(
@@ -537,7 +568,8 @@ async def back_callback(_, query):
             ],
             [
                 InlineKeyboardButton("Support Group", url="https://t.me/team_secrat_bots")
-            ]
+            ],
+            *([[InlineKeyboardButton("✅ Verify User", web_app=WebAppInfo(url=f"{VERIFY_URL}/verify"))]] if VERIFY_URL and query.message.chat.type == enums.ChatType.PRIVATE else [])
         ]
     )
     
@@ -556,6 +588,174 @@ Use /help for more info.
             caption=text
         ),
         reply_markup=keyboard
+    )
+
+# Verification Mini App launcher
+async def get_verification_group_name(group_id: int | None = None) -> str:
+    """Fetch a verification group's current Telegram title, with DB fallback."""
+    if group_id is None:
+        groups = await get_verification_groups()
+        if not groups:
+            return "this group"
+        group_id = int(groups[0]["chat_id"])
+    try:
+        chat = await app.get_chat(int(group_id))
+        title = getattr(chat, "title", None) or "this group"
+        await verification_groups_collection.update_one(
+            {"chat_id": int(group_id)}, {"$set": {"title": title}}
+        )
+        return title
+    except Exception as e:
+        doc = await verification_groups_collection.find_one({"chat_id": int(group_id)})
+        if doc and doc.get("title"):
+            return doc["title"]
+        logger.warning(f"Could not fetch verification group title: {e}")
+        return "this group"
+
+
+def verification_webapp_url(group_id: int) -> str:
+    return f"{VERIFY_URL}/verify?group_id={int(group_id)}"
+
+
+@app.on_message(filters.command(["addverifygroup"]) & filters.user(OWNER_ID))
+async def add_verify_group_command(_, message: Message):
+    if message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+        await message.reply_text("Add me to the target group as an admin, then run /addverifygroup there.")
+        return
+    try:
+        bot_user = await app.get_me()
+        me = await app.get_chat_member(message.chat.id, bot_user.id)
+        if me.status not in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]:
+            await message.reply_text("❌ Make me an admin first. I need permission to approve join requests and ban users.")
+            return
+    except Exception:
+        await message.reply_text("❌ I could not verify my admin permissions in this group.")
+        return
+    await add_verification_group(message.chat.id, message.chat.title or str(message.chat.id))
+    await message.reply_text(
+        f"✅ **Verification enabled for this group.**\n\n"
+        f"Group: **{message.chat.title or message.chat.id}**\n"
+        f"ID: `{message.chat.id}`\n\n"
+        "New join requests will be sent to verification before approval."
+    )
+
+
+@app.on_message(filters.command(["removeverifygroup"]) & filters.user(OWNER_ID))
+async def remove_verify_group_command(_, message: Message):
+    target_id = None
+    if message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+        target_id = message.chat.id
+    elif len(message.command) > 1:
+        try:
+            target_id = int(message.command[1])
+        except Exception:
+            pass
+    if target_id is None:
+        await message.reply_text("Use /removeverifygroup inside the group, or /removeverifygroup <group_id> in DM.")
+        return
+    doc = await verification_groups_collection.find_one({"chat_id": int(target_id)})
+    if not doc:
+        await message.reply_text("❌ That group is not in the verification list.")
+        return
+    await remove_verification_group(int(target_id))
+    await message.reply_text(f"✅ Removed **{doc.get('title') or target_id}** (`{target_id}`) from verification.")
+
+
+@app.on_message(filters.command(["verifygroups"]) & filters.user(OWNER_ID))
+async def verify_groups_command(_, message: Message):
+    groups = await get_verification_groups()
+    if not groups:
+        await message.reply_text("No verification groups added yet. Run /addverifygroup inside a group.")
+        return
+    lines = ["🔐 **Verification Groups**", ""]
+    for i, g in enumerate(groups, 1):
+        lines.append(f"{i}. **{g.get('title') or g['chat_id']}** — `{g['chat_id']}`")
+    lines.append("\nUse /removeverifygroup inside a group to remove it.")
+    await message.reply_text("\n".join(lines))
+
+
+@app.on_chat_join_request()
+async def verification_join_request(_, join_request):
+    group_id = int(join_request.chat.id)
+    enabled = await verification_groups_collection.find_one({"chat_id": group_id, "enabled": {"$ne": False}})
+    if not enabled:
+        return
+
+    user_id = int(join_request.from_user.id)
+    await verification_pending_collection.update_one(
+        {"group_id": group_id, "user_id": user_id},
+        {"$set": {
+            "group_id": group_id,
+            "group_title": join_request.chat.title or enabled.get("title") or str(group_id),
+            "user_id": user_id,
+            "status": "pending",
+            "requested_at": datetime.now(),
+        }},
+        upsert=True,
+    )
+
+    if not VERIFY_URL:
+        logger.warning("VERIFY_URL is not configured; cannot send verification link")
+        return
+
+    group_name = join_request.chat.title or enabled.get("title") or "this group"
+    text = (
+        "🔐 **Verification Required**\n\n"
+        f"**Group:** {group_name}\n\n"
+        "Verification is compulsory to be approved in this group.\n\n"
+        "✅ Secure device verification\n"
+        "⚡ Takes only a few seconds\n\n"
+        "Tap the button below to continue."
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            f"✅ Verify for {group_name}"[:64],
+            web_app=WebAppInfo(url=verification_webapp_url(group_id)),
+        )
+    ]])
+    try:
+        # Telegram provides user_chat_id for join requests so the bot can contact the requester.
+        await app.send_message(join_request.user_chat_id, text, reply_markup=keyboard)
+    except Exception as e:
+        logger.warning(f"Could not DM join requester {user_id}: {e}")
+
+
+@app.on_message(filters.command(["verify"]))
+async def verify_command(_, message: Message):
+    if not VERIFY_URL:
+        await message.reply_text("❌ Verification URL is not configured yet.")
+        return
+    if message.chat.type != enums.ChatType.PRIVATE:
+        await message.reply_text("🔐 Open the bot in private chat and send /verify.")
+        return
+
+    pending = await verification_pending_collection.find_one(
+        {"user_id": message.from_user.id, "status": "pending"},
+        sort=[("requested_at", -1)],
+    )
+    if pending:
+        group_id = int(pending["group_id"])
+    else:
+        groups = await get_verification_groups()
+        if not groups:
+            await message.reply_text("❌ No verification group has been configured yet.")
+            return
+        group_id = int(groups[0]["chat_id"])
+
+    group_name = await get_verification_group_name(group_id)
+    await message.reply_text(
+        f"🔐 **Verification Required**\n\n"
+        f"**Group:** {group_name}\n\n"
+        "Verification is compulsory to be approved in this group.\n\n"
+        "✅ Secure device verification\n"
+        "⚡ Takes only a few seconds\n\n"
+        "Tap the button below to continue.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                f"✅ Verify for {group_name}"[:64] if group_name != "this group" else "✅ Verify Now",
+                web_app=WebAppInfo(url=verification_webapp_url(group_id))
+            )
+        ]])
     )
 
 # AFK handler
