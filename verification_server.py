@@ -126,6 +126,19 @@ def get_chat_member(group_id: int, user_id: int):
     )
 
 
+def get_group_title(group_id: int) -> str:
+    """Best-effort Telegram group title lookup for user-facing verification messages."""
+    try:
+        result = telegram_api("getChat", {"chat_id": group_id})
+        if result.get("ok"):
+            title = str((result.get("result") or {}).get("title") or "").strip()
+            if title:
+                return title
+    except Exception:
+        pass
+    return "this group"
+
+
 def is_banned_in_group(group_id: int, user_id: int):
     result = get_chat_member(group_id, user_id)
     if not result.get("ok"):
@@ -649,7 +662,8 @@ def verify_api():
         return jsonify({
             "ok": False,
             "status": "restricted",
-            "message": "Verification could not be approved.",
+            "group_name": get_group_title(target_group_id),
+            "message": "You have been banned from this group. Please contact the group administrator.",
         }), 403
 
     # No banned Telegram ID was found for this exact device fingerprint: approve.

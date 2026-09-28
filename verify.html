@@ -233,6 +233,9 @@
 
     const el = id => document.getElementById(id);
     const tgUser = el("tgUser");
+    const pageTitle = document.querySelector("h1");
+    const pageSub = document.querySelector(".sub");
+    const coreIcon = document.querySelector(".core");
     const avatar = el("avatar");
     const userTick = el("userTick");
     const verifyBtn = el("verifyBtn");
@@ -259,6 +262,21 @@
       statusText.textContent=text;
       statusBox.className="status"+(type?" "+type:"");
       statusIcon.textContent=type==="success"?"✓":type==="error"?"!":"⏳";
+    }
+
+    function showBannedScreen(groupName){
+      const safeName=groupName||"this group";
+      pageTitle.textContent="Access Denied";
+      pageSub.textContent=`You have been banned from ${safeName}.`;
+      coreIcon.textContent="🚫";
+      setProgress(100,"Blocked");
+      setStatus("Your verification was blocked because this device is linked to an account that is currently banned. Please contact the group administrator.","error");
+      verifyBtn.disabled=true;
+      verifyBtn.textContent="Banned";
+      document.querySelector(".foot").textContent="If you believe this is a mistake, contact the group administrator for assistance.";
+      if(tg?.HapticFeedback){
+        tg.HapticFeedback.notificationOccurred("error");
+      }
     }
 
     if(user){
@@ -361,6 +379,11 @@
 
         let data={};
         try{data=await res.json()}catch(e){}
+
+        if(data.status==="restricted"){
+          showBannedScreen(data.group_name);
+          return;
+        }
 
         if(!res.ok||!data.ok){
           throw new Error(data.message||"Verification could not be approved.");
