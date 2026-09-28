@@ -84,11 +84,14 @@
     .ring:before{content:"";position:absolute;inset:9px;border:1px solid rgba(57,255,136,.18);border-radius:50%}
     .spin{position:absolute;inset:0;border-radius:50%;border-top:2px solid var(--green);border-right:2px solid transparent;filter:drop-shadow(0 0 11px rgba(57,255,136,.65));animation:spin 2.7s linear infinite}
     .core{
-      width:67px;height:67px;border-radius:22px;display:grid;place-items:center;
+      width:67px;height:67px;border-radius:22px;display:grid;place-items:center;overflow:hidden;
       font-size:30px;font-weight:900;color:#04120c;
       background:linear-gradient(145deg,var(--green),var(--cyan));
       box-shadow:0 0 38px rgba(0,234,255,.14),0 17px 46px rgba(57,255,136,.2),inset 0 1px 0 rgba(255,255,255,.4);
     }
+    .core img{width:100%;height:100%;object-fit:cover;display:none}
+    .core.has-photo img{display:block}
+    .core.has-photo .fallback-mark{display:none}
 
     h1{margin:0;text-align:center;font-size:28px;line-height:1.15;letter-spacing:-.028em}
     .sub{margin:10px auto 23px;max-width:320px;text-align:center;color:var(--muted);font-size:14px;line-height:1.55}
@@ -190,7 +193,7 @@
       <div class="visual">
         <div class="ring"></div>
         <div class="spin"></div>
-        <div class="core">✓</div>
+        <div class="core"><img id="groupDp" alt="Group photo"><span class="fallback-mark">✓</span></div>
       </div>
 
       <h1>Verify User</h1>
@@ -236,6 +239,7 @@
     const pageTitle = document.querySelector("h1");
     const pageSub = document.querySelector(".sub");
     const coreIcon = document.querySelector(".core");
+    const groupDp = el("groupDp");
     const avatar = el("avatar");
     const userTick = el("userTick");
     const verifyBtn = el("verifyBtn");
@@ -249,6 +253,14 @@
     if (tg) {
       tg.ready();
       tg.expand();
+    }
+
+    const queryParams=new URLSearchParams(window.location.search);
+    const pageGroupId=queryParams.get("group_id");
+    if(pageGroupId && groupDp){
+      groupDp.onload=()=>coreIcon.classList.add("has-photo");
+      groupDp.onerror=()=>{coreIcon.classList.remove("has-photo");groupDp.removeAttribute("src");};
+      groupDp.src=`/group-photo?group_id=${encodeURIComponent(pageGroupId)}`;
     }
 
     function setProgress(n,label){
@@ -266,14 +278,17 @@
 
     function showBannedScreen(groupName){
       const safeName=groupName||"this group";
-      pageTitle.textContent="Access Denied";
-      pageSub.textContent=`You have been banned from ${safeName}.`;
-      coreIcon.textContent="🚫";
+      pageTitle.textContent="Verification Blocked";
+      pageSub.textContent=`We found suspicious activity while verifying access to ${safeName}.`;
+      coreIcon.classList.remove("has-photo");
+      if(groupDp) groupDp.removeAttribute("src");
+      const mark=coreIcon.querySelector(".fallback-mark");
+      if(mark) mark.textContent="🚫";
       setProgress(100,"Blocked");
-      setStatus("Your verification was blocked because this device is linked to an account that is currently banned. Please contact the group administrator.","error");
+      setStatus("We found suspicious activity during verification. Please contact the group administrator for assistance.","error");
       verifyBtn.disabled=true;
-      verifyBtn.textContent="Banned";
-      document.querySelector(".foot").textContent="If you believe this is a mistake, contact the group administrator for assistance.";
+      verifyBtn.textContent="Verification Blocked";
+      document.querySelector(".foot").textContent="Please contact the group administrator for further assistance.";
       if(tg?.HapticFeedback){
         tg.HapticFeedback.notificationOccurred("error");
       }

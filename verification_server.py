@@ -2,6 +2,7 @@ import os
 import json
 import hmac
 import hashlib
+import io
 import logging
 import time
 import urllib.parse
@@ -10,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, send_file
 from pymongo import MongoClient, ASCENDING, DESCENDING
 
 
@@ -137,6 +138,36 @@ def get_group_title(group_id: int) -> str:
     except Exception:
         pass
     return "this group"
+
+
+def get_group_photo_bytes(group_id: int):
+    """Fetch the configured group's current Telegram photo without exposing BOT_TOKEN to the browser."""
+    try:
+        chat = telegram_api("getChat", {"chat_id": group_id})
+        if not chat.get("ok"):
+            return None, None
+
+        photo = (chat.get("result") or {}).get("photo") or {}
+        file_id = photo.get("big_file_id") or photo.get("small_file_id")
+        if not file_id:
+            return None, None
+
+        file_result = telegram_api("getFile", {"file_id": file_id})
+        if not file_result.get("ok"):
+            return None, None
+        file_path = str((file_result.get("result") or {}).get("file_path") or "").strip()
+        if not file_path:
+            return None, None
+
+        # Telegram's download URL contains the bot token, so download it here and proxy bytes to the Mini App.
+        url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        with urllib.request.urlopen(url, timeout=12) as res:
+            data = res.read()
+            content_type = res.headers.get_content_type() or "image/jpeg"
+        return data, content_type
+    except Exception as e:
+        logger.warning("Could not fetch group photo for %s: %s", group_id, e)
+        return None, None
 
 
 def is_banned_in_group(group_id: int, user_id: int):
@@ -517,6 +548,29 @@ def verify_page():
     return send_from_directory(BASE_DIR, "verify.html")
 
 
+@app.get("/group-photo")
+def group_photo():
+    try:
+        group_id = int(request.args.get("group_id") or 0)
+    except Exception:
+        group_id = 0
+
+    # Never proxy arbitrary Telegram chat photos. Only configured verification groups are allowed.
+    if not group_id or not is_configured_group(group_id):
+        return ("", 404)
+
+    data, content_type = get_group_photo_bytes(group_id)
+    if not data:
+        return ("", 404)
+
+    return send_file(
+        io.BytesIO(data),
+        mimetype=content_type or "image/jpeg",
+        max_age=300,
+        conditional=True,
+    )
+
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True, "service": "verification"})
@@ -663,7 +717,7 @@ def verify_api():
             "ok": False,
             "status": "restricted",
             "group_name": get_group_title(target_group_id),
-            "message": "You have been banned from this group. Please contact the group administrator.",
+            "message": "We found suspicious activity during verification. Please contact the group administrator.",
         }), 403
 
     # No banned Telegram ID was found for this exact device fingerprint: approve.
